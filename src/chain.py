@@ -12,7 +12,7 @@ from src.vectorstore import get_vectorstore
 load_dotenv()
 
 vectorstore = get_vectorstore()
-retriever = vectorstore.as_retriever()
+retriever1 = vectorstore.as_retriever()
 
 model = ChatGroq(model="llama-3.1-8b-instant")
 
@@ -32,13 +32,19 @@ prompt = ChatPromptTemplate.from_messages(
 )
 
 
-chain1 = (
-    RunnableParallel(context = retriever | format_docs, question = RunnablePassthrough())
-    | prompt | model | StrOutputParser()
-)
+def build_rag_chain(retriever):
+    return(
+        RunnableParallel(
+            context = retriever | format_docs,
+            question = RunnablePassthrough()
+        )
+        | prompt | model | StrOutputParser()
+    )
+
+chain1 = build_rag_chain(retriever1)
 
 
 if __name__ =="__main__":
     question = "what is Nvidia's total revenue of the fiscal year 2025"
-    answer = chain1.invoke({"question": question})
+    answer = chain1.invoke(question)
     print(answer)

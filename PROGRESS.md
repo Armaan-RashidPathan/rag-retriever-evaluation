@@ -1,0 +1,72 @@
+# LangChain Mastery Project — Progress Log
+
+A running record of what's been built, what was learned, and decisions made. Meant to be edited/revised by you as we go.
+
+---
+
+## Milestone 1 — LCEL Foundations + Basic RAG (Complete)
+
+**Goal:** ingest the 3 NVIDIA annual reports, embed them, and answer questions via a basic LCEL RAG chain.
+
+### What was built
+- [`src/ingest.py`](src/ingest.py) — `load_and_split()`: loads all PDFs in `data/` via `PyPDFLoader`, splits into ~1000-char chunks (150 overlap) via `RecursiveCharacterTextSplitter`. Produces 2512 chunks from 3 reports.
+- [`src/vectorstore.py`](src/vectorstore.py) — `build_vectorstore()` / `get_vectorstore()`: embeds chunks with free local `HuggingFaceEmbeddings` (`sentence-transformers/all-MiniLM-L6-v2`), persists to Chroma at `chromadb/`. `force=True` wipes and rebuilds; `force=False` (default) reuses the persisted store.
+- [`src/format_docs.py`](src/format_docs.py) — joins retrieved `Document.page_content` into one string for the prompt.
+- [`src/chain.py`](src/chain.py) — the LCEL chain: `RunnableParallel(context=retriever | format_docs, question=RunnablePassthrough()) | prompt | model | StrOutputParser()`. LLM is `ChatGroq(model="llama-3.1-8b-instant")` (free tier).
+
+### Key concepts learned
+- **`Runnable` is the universal interface** — anything with `.invoke()` composes via `|`. This is why swapping `ChatOpenAI` → `ChatGroq`, or `similarity_search` → `as_retriever()`, doesn't change the rest of the chain.
+- **`RunnableParallel` + `RunnablePassthrough`** solve the "the prompt needs both the original question AND derived context" problem — a plain linear chain can't branch, so `RunnableParallel` runs multiple Runnables against the same input and returns a dict.
+- **Bare Python functions/lambdas auto-coerce to `RunnableLambda`** when used with `|` — no need to wrap manually.
+- **`vectorstore.as_retriever()`** wraps a vectorstore's `similarity_search` in a `Runnable`, which is what makes it chainable.
+
+### Bugs hit and root causes (worth remembering)
+1. Absolute hardcoded paths in `ingest.py`/`vectorstore.py` — fixed with `Path(__file__).resolve().parent.parent / "..."`, portable across machines.
+2. Typos (`iterdit`, `count_documents()`, `langchain_hugginface`) — caught by actually running the code.
+3. Bare `from ingest import ...` import — broke under `python -m src.xxx` / package-style imports; fixed to `from src.ingest import ...`. **Lesson: this project must be run as `python -m src.<module>` from the project root, never `python <module>.py` from inside `src/`.**
+4. `force=True` didn't clear the old collection before re-adding documents — `Chroma.from_documents` appends, doesn't replace. Fixed by `shutil.rmtree()` before rebuild.
+5. **Big one:** `tests/test_vectorstore.py`'s `test_build_vectorstore_force_rebuild` monkeypatched `load_and_split` but NOT `VECTORSTORE_DIR` — so running `pytest` wiped the real persisted vectorstore (2512 real chunks) and replaced it with 2 dummy test docs, in-place. Diagnosed by inspecting `vs._collection.count()` and `similarity_search` output directly. Rebuilt via `build_vectorstore(force=True)` against the real PDFs. **The test itself is not yet fixed — still unsafe to run `pytest` until it's test-isolated (deferred to Milestone 1's task #5 / pytest lesson).**
+6. Chain invoked with `chain1.invoke({"question": question})` instead of `chain1.invoke(question)` — since `question=RunnablePassthrough()` expects the chain's raw input to already be the string, not a dict.
+
+### Known limitation (motivates Milestone 2)
+Basic top-k similarity search doesn't reliably match year-specific phrasing across 3 near-identical annual reports — e.g. "NVIDIA total revenue fiscal year 2025" retrieved a *different* year's revenue table. Confirmed the LCEL/retrieval/generation plumbing is otherwise fully correct (verified with a question matching what was actually retrieved).
+
+---
+
+## Milestone 2 — Advanced RAG Architecture (In Progress)
+
+**Goal:** fix the retrieval-quality gap above using Multi-Query Retrieval, Contextual Compression, and Parent Document Retrieval — and evaluate them against each other, not just against vibes.
+
+### Plan
+- **Step 0 — Eval set:** 8-10 fixed questions (easy / ambiguous-phrasing / table-dependent) with expected-answer notes, to compare strategies objectively.
+- **Step 1 — Multi-Query Retrieval:** `MultiQueryRetriever.from_llm(retriever=retriever, llm=model)` — LLM rewrites the question multiple ways before retrieving.
+- **Step 2 — Contextual Compression:** `ContextualCompressionRetriever` — start with `EmbeddingsFilter` (free/local), then try `LLMChainExtractor` (costs one LLM call per retrieved doc — watch Groq rate limits).
+- **Step 3 — Parent Document Retriever:** new/separate index using small child chunks for search + large parent chunks (e.g. whole page) returned for context, to stop mangling financial tables. Uses `InMemoryStore` as the docstore (not persisted across restarts — noted for later).
+- **Step 4 — Comparative evaluation:** run the Step 0 eval set through all four retrievers (baseline + 3 new), compare correctness, context quality, extra LLM calls, latency.
+
+**Step 3 — Parent Document Retriever: implemented, one real bug found and fixed, result not yet re-verified.**
+- Built in `src/retrievers/parent_document.py`. Refactored `src/ingest.py` to split out `load_documents()` (loading only) from `load_and_split()` (loading + splitting), since `ParentDocumentRetriever` needs raw unsplit documents to do its own two-granularity splitting (`child_splitter`: 400 chars, `parent_splitter`: 2000 chars).
+- Import paths (same relocation pattern as Steps 1-2): `from langchain_classic.retrievers.parent_document_retriever import ParentDocumentRetriever`, `from langchain_classic.storage import InMemoryStore` (re-export of `langchain_core.stores.InMemoryStore`).
+- Design decision: `InMemoryStore` never persists across runs, so `build_parent_document_retriever()` always wipes and rebuilds `chromadb_parent_child/` from scratch on every call rather than trying to reuse a persisted store — an old vectorstore with no matching docstore would silently break retrieval (child chunks found, but no parent doc to look up). Real cost: full re-embed every run, and more total chunks than Milestone 1 (400-char chunks vs. 1000-char), so this is the slowest of the three techniques to test.
+- **Real bug found:** `retriever.add_documents(raw_docs)` in one call hit `chromadb.errors.InternalError: Batch size of 6444 is greater than max batch size of 5461` — Chroma caps upsert batch size, and `ParentDocumentRetriever.add_documents()` doesn't batch internally. Fixed by batching the *raw* (page-level) documents into groups of 50 before calling `add_documents()` per batch (each call gets fresh random IDs, no collision risk).
+- **Same k-too-small issue as Step 2's first attempt:** `ParentDocumentRetriever`/`MultiVectorRetriever`'s `search_kwargs` defaults to `{}` (Chroma's implicit default k, ~4) — first real run retrieved 4 parent docs, none containing the FY2025 figure. Fixed by passing `search_kwargs={"k": 12}` at construction, matching Step 2's finding. **Not yet re-run to confirm this actually surfaces the correct chunk** — deferred, will show up naturally once Step 4's comparison script runs this retriever against the eval set.
+
+### Progress notes
+
+**Step 1 — Multi-Query Retrieval: implemented, working, and gave an important negative result.**
+- Built in `src/retrievers/multiquery.py`: `MultiQueryRetriever.from_llm(retriever=base_retriever, llm=model)`.
+- Import path note: in this project's installed version (LangChain 1.x), `MultiQueryRetriever` is NOT under `langchain.retrievers` — it moved to a separate `langchain_classic` package: `from langchain_classic.retrievers.multi_query import MultiQueryRetriever`.
+- Must use `.from_llm(...)` classmethod, not the raw `MultiQueryRetriever(...)` constructor (raw constructor requires a pre-built `llm_chain`, which `.from_llm` builds for you from a plain `llm`).
+- **Finding:** tested against the FY2025 total-revenue question (the same one that failed in Milestone 1). Multi-query pulled back 11 deduped documents across all 3 reports — genuinely broader than baseline — but still did NOT retrieve the chunk containing the actual figure ($130,497M, found in the 2026 report's "Geographic Revenue" table). Conclusion: multi-query fixes *vocabulary mismatch* between question and source text, but can't help when the target fact sits inside a chunk that isn't topically "about" the question (a geography-organized table, not a "total revenue" table) — no rephrasing bridges that gap. This looks like a chunking/structure problem, which points at Parent Document Retrieval (Step 3) rather than query rewriting.
+- Open question to test later: does bumping base retriever's `k` (currently unset/default) surface the target chunk with a wider net? Not yet tested.
+
+**Step 2 — Contextual Compression: implemented, plus a genuinely useful diagnostic detour.**
+- Import path note (same pattern as Step 1): `ContextualCompressionRetriever` and `EmbeddingsFilter` live under `langchain_classic.retrievers` / `langchain_classic.retrievers.document_compressors`, not `langchain.retrievers`.
+- Built in `src/retrievers/contextual_compression.py`: base retriever (`k=8` initially) wrapped with `ContextualCompressionRetriever(base_compressor=EmbeddingsFilter(embeddings=..., similarity_threshold=0.5), base_retriever=...)`.
+- **First run:** `EmbeddingsFilter` filtered out zero documents at `threshold=0.5`. Diagnosed by computing actual cosine similarity scores manually — all 8 base-retrieved docs scored 0.68-0.81, i.e. threshold was far too permissive for how this embedding model scores dense financial-table text against a financial question. Notably, a totally irrelevant lease-schedule chunk scored *highest* (0.81) — MiniLM appears to match on surface structure ("table full of $ amounts under fiscal-year headers") more than deep topical relevance.
+- **Root-caused the recurring FY2025 miss** (failed in both Step 1 and this step's first run): computed the actual target chunk's similarity score directly — the real "$130.5 billion" chunk scored 0.665, only just below the k=8 cutoff (0.677). Not a deep semantic-distance problem, just a narrow miss.
+- **Fix confirmed:** raised `k` to 12 → the target chunk (page 17 of `NVIDIA-2025-Annual-Report.pdf`, "revenue surging 114% year on year to $130.5 billion") was retrieved. `EmbeddingsFilter` correctly preserved it (only dropped 1 of 12 docs — a % ratio table).
+- **Honest takeaway:** for this embedding model/corpus, `k` was the lever that mattered, not the compression filter itself — `EmbeddingsFilter` at this threshold mostly passes documents through rather than meaningfully cutting noise. `EmbeddingsFilter` filters, it does not re-rank — a chunk that scores lower than an irrelevant one (like the 0.81 lease schedule) can't be filtering-boosted back to the top; only a wider `k` or a re-ranker (e.g. `CrossEncoderReranker`, seen available under the same `document_compressors` package but not yet tried) could do that.
+- **End-to-end confirmation:** refactored `src/chain.py` to expose `build_rag_chain(retriever) -> Runnable` (factory function, so every retriever variant reuses the same prompt/model/parser instead of duplicating it — needed for Step 4's apples-to-apples comparison anyway). `contextual_compression.py` now does `chain = build_rag_chain(compression_retriever)`. Result: the exact FY2025 revenue question that returned "I don't know" in Milestone 1 now correctly answers **"$130.5 billion"**, fully end-to-end (k=12 base retriever + EmbeddingsFilter threshold=0.65).
+- Regression caught during the `chain.py` refactor: `StrOutputParser` written without `()` (a class, not an instance) — `|` piping silently accepted it at chain-construction time but crashed at invoke with a confusing pydantic `TypeError`. Also re-introduced the `chain1.invoke({"question": ...})` dict-vs-string bug from Milestone 1 — same fix as before (`RunnablePassthrough()` needs the chain's raw input to already be the string).
+- **Step 2 marked complete** — core goal (fix the FY2025 retrieval gap) proven end-to-end. `LLMChainExtractor` (second compressor flavor) deliberately deferred to a later task rather than blocking progress to Step 3.

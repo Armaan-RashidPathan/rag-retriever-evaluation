@@ -7,16 +7,20 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 
+def load_documents(data_dir: Path = DATA_DIR) -> list[Document]:
+    docs = []
+    for pdf_path in data_dir.glob("*.pdf"):
+        loader = PyPDFLoader(file_path=str(pdf_path))
+        docs.extend(loader.load())
+    return docs
+
+
 def load_and_split(
     data_dir: Path = DATA_DIR,
     chunk_size: int = 1000,
     chunk_overlap: int = 150,
 ) -> list[Document]:
-    docs = []
-    for pdf_path in data_dir.glob("*.pdf"):
-        loader = PyPDFLoader(file_path=str(pdf_path))
-        docs.extend(loader.load())
-
+    docs = load_documents(data_dir)
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
