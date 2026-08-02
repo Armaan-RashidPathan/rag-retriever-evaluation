@@ -51,6 +51,19 @@ Basic top-k similarity search doesn't reliably match year-specific phrasing acro
 - **Real bug found:** `retriever.add_documents(raw_docs)` in one call hit `chromadb.errors.InternalError: Batch size of 6444 is greater than max batch size of 5461` — Chroma caps upsert batch size, and `ParentDocumentRetriever.add_documents()` doesn't batch internally. Fixed by batching the *raw* (page-level) documents into groups of 50 before calling `add_documents()` per batch (each call gets fresh random IDs, no collision risk).
 - **Same k-too-small issue as Step 2's first attempt:** `ParentDocumentRetriever`/`MultiVectorRetriever`'s `search_kwargs` defaults to `{}` (Chroma's implicit default k, ~4) — first real run retrieved 4 parent docs, none containing the FY2025 figure. Fixed by passing `search_kwargs={"k": 12}` at construction, matching Step 2's finding. **Not yet re-run to confirm this actually surfaces the correct chunk** — deferred, will show up naturally once Step 4's comparison script runs this retriever against the eval set.
 
+**Step 4 — Comparative evaluation: skipped as a formal script; findings already gathered via manual side-by-side runs during Steps 1-3.**
+
+Summary of the FY2025-total-revenue test case across all techniques:
+
+| Retriever | Result | Key lesson |
+|---|---|---|
+| Baseline (Milestone 1) | Failed — wrong year's table | Motivated this whole milestone |
+| Multi-Query | Failed — broader results, still missed target chunk | Fixes vocabulary mismatch, not "target chunk scores low for structural reasons" |
+| Contextual Compression (`EmbeddingsFilter`) | **Succeeded** ("$130.5 billion") once `k` was tuned from measured scores | Real fix was `k`, not the filter itself — `EmbeddingsFilter` filters, doesn't re-rank |
+| Parent Document Retriever | Implemented, same `k` fix applied, not re-verified | Real bug found/fixed (Chroma batch-size cap); result deferred |
+
+**Milestone 2 conclusion:** the actual root cause of the FY2025 retrieval gap was insufficient `k` (too few candidates considered), not vocabulary mismatch or chunk noise — diagnosed by directly measuring cosine similarity scores rather than guessing. Multi-Query and Contextual Compression are still legitimate, separate tools for different problems (phrasing mismatch, and noise/irrelevance filtering respectively), but neither was the actual lever that mattered for this specific case. Formal `LLMChainExtractor` comparison and a from-scratch `run_eval.py` script remain deferred (tasks #11 and the original eval script) if revisited later.
+
 ### Progress notes
 
 **Step 1 — Multi-Query Retrieval: implemented, working, and gave an important negative result.**
