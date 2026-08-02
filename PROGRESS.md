@@ -64,6 +64,18 @@ Summary of the FY2025-total-revenue test case across all techniques:
 
 **Milestone 2 conclusion:** the actual root cause of the FY2025 retrieval gap was insufficient `k` (too few candidates considered), not vocabulary mismatch or chunk noise — diagnosed by directly measuring cosine similarity scores rather than guessing. Multi-Query and Contextual Compression are still legitimate, separate tools for different problems (phrasing mismatch, and noise/irrelevance filtering respectively), but neither was the actual lever that mattered for this specific case. Formal `LLMChainExtractor` comparison and a from-scratch `run_eval.py` script remain deferred (tasks #11 and the original eval script) if revisited later.
 
+## Milestone 3 — Structured Extraction + Memory (In Progress)
+
+**Step 1 — Structured Extraction: mechanism confirmed working, one real bug found and fixed (not re-verified).**
+- `src/pydantic_schemas.py`: nested Pydantic schema — `FiscalYearFinancials` containing `segment_revenues: list[SegmentRevenue]`.
+- `src/extraction.py`: `model.with_structured_output(FiscalYearFinancials, method="function_calling")` — verified Groq's `llama-3.1-8b-instant` supports this correctly (tested with a trivial schema first).
+- First real run returned a correctly-typed nested object, but with wrong/inconsistent data: `fiscal_yr='2026'` while the actual figures matched FY2024's table ($60,922M total revenue).
+- **Root cause:** the retrieval query string was only used to search the vectorstore — it never reached the LLM prompt. The prompt said "extract... for the following year" without ever specifying *which* year, so the model guessed. This is the same `RunnablePassthrough` lesson from Milestone 1 (prompt needs both original input AND derived context) — mistakenly dropped when simplifying to a single-key `RunnableParallel` for the "no separate question needed" extraction case. Fixed by adding `query=RunnablePassthrough()` back as a second `RunnableParallel` branch and a `{query}` placeholder in the prompt. **Not yet re-run to confirm the fix resolves it** — if it still pulls the wrong year, `retriever1`'s missing explicit `k` (same Milestone 2 lesson) would be the next suspect.
+
+**Step 2 — Conversational Memory: done.** `src/conversational_memory/conversational_chain.py` — `RunnableWithMessageHistory` wrapping the RAG chain, `MessagesPlaceholder("history")` in the prompt, `InMemoryChatMessageHistory` per session. Bugs hit along the way: wrong kwarg (`get_session_id` vs `get_session_history`), unnecessary `output_messages_key` on a plain-string-output chain (silent `KeyError` in the history callback), a bare string in `from_messages` parsed as an implicit extra `HumanMessage` rather than joining the system message, and missing `config={"configurable": {"session_id": ...}}` on invoke. `RunnableWithMessageHistory` is deprecated in favor of LangGraph persistence — used anyway since LangGraph is explicitly out of scope for this project's core-LangChain phase.
+
+**Milestone 3 complete.**
+
 ### Progress notes
 
 **Step 1 — Multi-Query Retrieval: implemented, working, and gave an important negative result.**
