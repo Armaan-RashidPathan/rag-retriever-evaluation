@@ -14,7 +14,7 @@ load_dotenv()
 vectorstore = get_vectorstore()
 retriever1 = vectorstore.as_retriever()
 
-model = ChatGroq(model="llama-3.1-8b-instant")
+model = ChatGroq(model="openai/gpt-oss-120b")
 
 
 

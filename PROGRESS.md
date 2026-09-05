@@ -76,6 +76,39 @@ Summary of the FY2025-total-revenue test case across all techniques:
 
 **Milestone 3 complete.**
 
+## Milestone 4 — Tool & Function Calling (Complete)
+
+- `src/tool_calling/tools.py`: three `@tool`-decorated functions (`calculate_growth_percent`, `get_segment_revenue` lookup, `get_current_date`), bugs fixed (wrong import, missing `datetime` import, undefined `REVENUE_DATA`). Folder was originally misnamed `tool_calling_and_agent.py` (invalid — `.py` in a directory name breaks Python's import system); renamed to `src/tool_calling/`.
+- `src/tool_calling/agent.py`: manual bind-tools + execute loop (`model.bind_tools(TOOLS)` -> inspect `.tool_calls` -> run matching tool -> feed back as `ToolMessage` -> final `.invoke()`). Verified tool *selection* and argument extraction work correctly by inspecting raw `tool_calls` output directly.
+- **Real finding:** the free 8B model (`llama-3.1-8b-instant`, used everywhere else in this project) reliably picks the right tool and args, but is unreliable at *synthesizing* the tool's result into a correct final answer (returned empty/vague answers, and once hallucinated a fake tool-call syntax and fabricated data instead of using the real `ToolMessage` already in context). Prompt-patching (a forceful system instruction) helped partially but not fully. Root-caused as a genuine small-model capability limit, not a code bug — confirmed by swapping to `llama-3.3-70b-versatile` (still free on Groq) for just this agent, which fixed all cases immediately, including correctly declining to call a tool for an unrelated question. Kept as a separate model instance in `agent.py` rather than changing `src/chain.py`'s shared model, to avoid touching already-verified Milestone 1-3 code.
+
+**Milestone 4 complete — all 4 core LangChain milestones done.** Deferred/open items: task pytest lesson (#5), `LLMChainExtractor` (#11).
+
+## Database Track — Milestone 1: PostgreSQL (Complete)
+
+- `src/db/models.py`, `src/db/connections.py`, `src/db/persist.py` built —
+  full round trip verified: LLM structured extraction → SQLAlchemy ORM
+  objects → Postgres insert → read back, correct data (`year=2025,
+  total_revenue_millions=130497`, segments `Compute & Networking: 116193`,
+  `Graphics: 14304`).
+- Real bugs fixed: missing paired `relationship()`/`back_populates` on
+  `FiscalYear`, wrongly-scoped `unique=True`, bare `from models import`
+  import, a `SegmentRevenue` name collision between two different modules
+  (`src.db.models` vs `src.pydantic_schemas`) silently shadowing the correct
+  class, and a `DetachedInstanceError` risk from reading an id after closing
+  the session.
+- **External issue, not a code bug:** Groq retired the entire Llama model
+  family from the account mid-session (`llama-3.1-8b-instant` /
+  `llama-3.3-70b-versatile` both gone). Diagnosed via `client.models.list()`,
+  switched the shared model in `src/chain.py` to `openai/gpt-oss-120b`.
+- This also re-surfaced the Milestone 2 "`k` too small" lesson in
+  `src/extraction.py` (never previously tuned) — needed `k=20` (higher than
+  Milestone 2's `k=12`) because the segment-breakdown table's actual numbers
+  sit in a *second* chunk, split from its own heading by the flat 1000-char
+  chunking. Full detail in `Notes/05_databases.md` and
+  `Notes/07_problems_and_solutions.md` (new: a consolidated troubleshooting
+  log across the entire project, organized by category).
+
 ### Progress notes
 
 **Step 1 — Multi-Query Retrieval: implemented, working, and gave an important negative result.**

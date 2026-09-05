@@ -1,8 +1,14 @@
-from src.chain import model, build_rag_chain, retriever1
+from src.chain import model
+from src.vectorstore import get_vectorstore
 from src.pydantic_schemas import FiscalYearFinancials
 from langchain_core.prompts import ChatPromptTemplate
 from src.format_docs import format_docs
 from langchain_core.runnables import RunnableParallel,RunnablePassthrough
+
+# Explicit k=12 here (not the bare retriever1 from src.chain, which has no k
+# set): same fix as Milestone 2's Contextual Compression finding — the target
+# chunk with real FY2025 figures narrowly misses the default cutoff (~k=4).
+retriever = get_vectorstore().as_retriever(search_kwargs={"k": 20})
 
 structured_model = model.with_structured_output(FiscalYearFinancials, method="function_calling")
 
@@ -13,11 +19,8 @@ prompt = ChatPromptTemplate.from_messages(
     ]
 )
 
-extraction_chain = prompt | structured_model
-
-
 extraction_chain = (
-    RunnableParallel(context=retriever1 | format_docs, query = RunnablePassthrough())
+    RunnableParallel(context=retriever | format_docs, query = RunnablePassthrough())
     | prompt
     | structured_model
 )
