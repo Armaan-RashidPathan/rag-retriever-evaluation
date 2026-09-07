@@ -37,7 +37,7 @@ def save_financial(data: FiscalYearFinancials) -> int:
 
 if __name__ == "__main__":
     data = extraction_chain.invoke(
-        "NVIDIA fiscal year 2025 total revenue and segment breakdown"
+        "NVIDIA fiscal year 2023 total revenue and segment breakdown"
     )
     print("Extracted from LLM:")
     print(data)
